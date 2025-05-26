@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
+	"github.com/container-registry/harbor-satellite/internal/eventbus"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
 	"zotregistry.dev/zot/pkg/cli/server"
@@ -14,12 +16,14 @@ import (
 type ZotManager struct {
 	zotConfig json.RawMessage
 	log       *zerolog.Logger
+	bus       *eventbus.EventBus
 }
 
-func NewZotManager(log *zerolog.Logger, zotConfig json.RawMessage) *ZotManager {
+func NewZotManager(log *zerolog.Logger, zotConfig json.RawMessage, bus *eventbus.EventBus) *ZotManager {
 	return &ZotManager{
 		zotConfig: zotConfig,
 		log:       log,
+		bus:       bus,
 	}
 }
 
@@ -100,12 +104,36 @@ func (zm *ZotManager) RemoveTempZotConfig(tmpPath string) error {
 func (zm *ZotManager) LaunchZotRegistry(zotConfigPath string) error {
 	zm.log.Info().Str("configPath", zotConfigPath).Msg("Launching zot registry")
 
+	// Extract registry address/port for event payload
+	var config struct {
+		HTTP struct {
+			Address string `json:"address"`
+			Port    string `json:"port"`
+		} `json:"http"`
+	}
+	if err := json.Unmarshal(zm.zotConfig, &config); err != nil {
+		zm.log.Warn().Err(err).Msg("Could not parse zot config for event payload")
+	}
+
 	rootCmd := server.NewServerRootCmd()
 	rootCmd.SetArgs([]string{"serve", zotConfigPath})
 
 	if err := rootCmd.Execute(); err != nil {
 		zm.log.Error().Err(err).Str("configPath", zotConfigPath).Msg("Failed to launch zot registry")
 		return fmt.Errorf("failed to launch zot registry with config present at %s: %w", zotConfigPath, err)
+	}
+
+	// Emit REGISTRY_STARTED event
+	if zm.bus != nil {
+		zm.bus.Publish(eventbus.Event{
+			Type:      "REGISTRY_STARTED",
+			Timestamp: time.Now(),
+			Source:    "ZotManager",
+			Payload: map[string]interface{}{
+				"address": config.HTTP.Address,
+				"port":    config.HTTP.Port,
+			},
+		})
 	}
 
 	zm.log.Info().Msg("Shutting down Zot registry")

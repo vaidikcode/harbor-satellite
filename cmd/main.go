@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
+	"github.com/container-registry/harbor-satellite/internal/eventbus"
 	"github.com/container-registry/harbor-satellite/internal/logger"
 	"github.com/container-registry/harbor-satellite/internal/registry"
 	"github.com/container-registry/harbor-satellite/internal/satellite"
@@ -42,7 +44,7 @@ func run() error {
 	go scheduler.ListenForProcessEvent()
 
 	// Handle registry setup
-	if err := handleRegistrySetup(wg, log, cancel, cm); err != nil {
+	if err := handleRegistrySetup(wg, log, cancel, cm, eventbus.NewEventBus()); err != nil {
 		log.Error().Err(err).Msg("Error setting up local registry")
 		return err
 	}
@@ -66,10 +68,31 @@ func run() error {
 		return satelliteService.Run(ctx)
 	})
 
+	bus := eventbus.NewEventBus()
+
+	bus.Subscribe("CONFIG_UPDATED", func(e eventbus.Event) {
+		fmt.Printf("[CONFIG_UPDATED] at %s from %s: %v\n", e.Timestamp.Format(time.RFC3339), e.Source, e.Payload)
+	})
+
+	bus.Subscribe("REGISTRY_STARTED", func(e eventbus.Event) {
+		fmt.Printf("[REGISTRY_STARTED] at %s from %s: %v\n", e.Timestamp.Format(time.RFC3339), e.Source, e.Payload)
+	})
+
+	bus.Publish(eventbus.Event{
+		Type:      "CONFIG_UPDATED",
+		Timestamp: time.Now(),
+		Source:    "main",
+		Payload: map[string]interface{}{
+			"configVersion": "v1.2.3",
+		},
+	})
+
+	time.Sleep(500 * time.Millisecond)
+
 	return wg.Wait()
 }
 
-func handleRegistrySetup(g *errgroup.Group, log *zerolog.Logger, cancel context.CancelFunc, cm *config.ConfigManager) error {
+func handleRegistrySetup(g *errgroup.Group, log *zerolog.Logger, cancel context.CancelFunc, cm *config.ConfigManager, bus *eventbus.EventBus) error {
 	log.Debug().Msg("Setting up local registry")
 	if cm.GetOwnRegistry() {
 		log.Info().Msg("Configuring own registry")
@@ -81,7 +104,7 @@ func handleRegistrySetup(g *errgroup.Group, log *zerolog.Logger, cancel context.
 	} else {
 		log.Info().Msg("Launching default registry")
 
-		zm := registry.NewZotManager(log, cm.GetRawZotConfig())
+		zm := registry.NewZotManager(log, cm.GetRawZotConfig(), bus)
 
 		return zm.HandleRegistrySetup(g, cancel)
 	}
